@@ -15,7 +15,7 @@ And outside the system, there are two clients
 *	Frontend 
 
 The frontend is an abstract concept, it can be any agent that search stored pictures by words, for example, a web app, a mobile app or an Alexa skill. 
- 
+![](https://github.com/06393993/kenmyo-arch/blob/master/kenmyo-arch-0.0.png)
 The dash line draws the boundary of Kenmyo backend system. Note that the authentication and the user system is not included in this graph, because they are light weight service directly provided by AWS, we will talk about the user system in device management and authentication in application server.
 
 Here are some basic principals when implementing all microservices.
