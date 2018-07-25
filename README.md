@@ -3,16 +3,16 @@
 ## Overview 
 This project will use microservice architecture. There will be 5 different services. 
 
-*	Image storage 
-*	Image search 
-*	Object detection 
-*	Device management 
-*	Application Server 
+* Image storage 
+* Image search 
+* Object detection 
+* Device management 
+* Application Server 
 
 And outside the system, there are two clients 
 
-*	Camera 
-*	Frontend 
+* Camera 
+* Frontend 
 
 The frontend is an abstract concept, it can be any agent that search stored pictures by words, for example, a web app, a mobile app or an Alexa skill. 
 ![](https://github.com/06393993/kenmyo-arch/blob/master/kenmyo-arch-0.0.png)
@@ -20,11 +20,11 @@ The dash line draws the boundary of Kenmyo backend system. Note that the authent
 
 Here are some basic principals when implementing all microservices.
 
-*	Systems should communicate over HTTP, and should use Netflix Falcor technique (https://netflix.github.io/falcor/)
-*	All API endpoint should use lambda to implement
-*	Services may have their own permanent storage, but should not share between services
-*	Authentication and authorization should only happen at the edge of the system
-*	Event driven
+* Systems should communicate over HTTP, and should use Netflix Falcor technique (https://netflix.github.io/falcor/)
+* All API endpoint should use lambda to implement
+* Services may have their own permanent storage, but should not share between services
+* Authentication and authorization should only happen at the edge of the system
+* Event driven
 
 The following sections will introduce the 7 components one by one. For the 5 services, the data schema in typescript’s type notation will be included.
 
@@ -35,7 +35,7 @@ The events will not be included in this draft. The detailed design of events sho
 This is where images and related information stored. This service exposes following interfaces to the corresponding components:
 
 * Add: allow Cameras to upload pictures
-*	Get by id: allow App Server and Object Detection to retrieve image and related information
+* Get by id: allow App Server and Object Detection to retrieve image and related information
 
 The endpoint of the Image Storage is `/images.json`. In order to define the data schema of Image Storage, we should first define `Image` interface.
 
@@ -72,13 +72,13 @@ Now we can define the schema of the Image Storage.
 ```typescript
 interface Images {
   [ id: number ]: Image;
-  add: string => void;
+  add: (image: string) => void;
 }
 ```
-Only get operation is supported. All set operation will be denied.
+Only get operation is supported, and only the user who owns the picture can get the given images, except for the Image Search system, which has the full access to get any of the images. All set operation will be denied. The users' identity will be stored in the HTTP header.
 
 * Images will be indexed by ids.
-* `add` function will add an image to the Image Storage. It accepts a png image encoded by base64 string as the only parameter. The server will automatically calculate the rest properties of the `Image` interface. Once an image is added, the Image Storage will emit an event to notify the system that a new image is added. If the device that calls the function is not owned by any of the user, the call should be denied.
+* `add` function will add an image to the Image Storage. This function can only be called by a Camera. The identity of the Camera will be stored in the HTTP header. It accepts a png image encoded by base64 string as the second parameter. The server will automatically calculate the rest properties of the `Image` interface. Once an image is added, the Image Storage will emit an event to notify the system that a new image is added. Only the Device Management can call this function. If the device that calls the function is not owned by any of the user, the call should be denied. How the camera should add an image will be included in the Camera section.
 
 S3, dynamodb and redis are all candidates for the permanent storage of Image Storage.
 
@@ -116,7 +116,7 @@ Interface ObjToImg {
   }
 }
 ```
-Only get operation is supported. All set operation will be denied.
+Given a user, the user can only get the object that his id matches. All set operation will be denied. The users' identity will store in the header of the HTTP request.
 
 All the DetectionResults are grouped and indexed by the users who owns the related image and the objects related to them. As mentioned, the order will be in the ascending order according to confidence level.
 
@@ -155,11 +155,11 @@ interface DetectionJobs {
   removeResults: (DetectionResult[]) => void;
 }
 ```
-Only get operation will be accepted. All set operation will be denied.
+Only get operation will be accepted. All set operation will be denied. Only the Image Search have access to this endpoint.
 
 * `jobs`: jobs indexed by job id. Each job is an array of reference to DetectionResult. When the Object Detection emit an event indicating a job is done, the job id will be enclosed to that event.
 * `results`: detection results indexed by id.
-* `removeResults`: this function allow Image Search to inform Object Detection that the results have been archived, so the Object Detection may remove those results to free some space for the incoming results. This function will influence correspoding jobs as well.
+* `removeResults`: this function allows Image Search to inform Object Detection that the results have been archived, so the Object Detection may remove those results to free some space for the incoming results. This function will influence correspoding jobs as well.
 
 Object Detection service consists of an image collector, a scheduler, a front router and a large machine learning cluster.
 
@@ -172,8 +172,169 @@ SQS or a queue inside the scheduler can be the candidates for the unprocessed im
 
 ## Device Management
 
-## Application Server
+This service will allow users to manage their devices. Currently, users can link their accounts to Cameras from Cameras or unlink Cameras from either Cameras or a web management app. This service also stores the related information of the devices and provides interfaces to query and modify it.
+
+The endpoint of this service is `/devices.json`. To define the data schema, we should first introduce the `Device` schema.
+
+```typescript
+interface Device {
+  id: string;
+  name: string;
+  ownedBy?: string;
+  locationDesc?: string;
+}
+```
+
+* `id`: the id of the device. It is provided by AWS IoT SDK.
+* `name`: the name of the device. It is editable by the user. This value should be kept in sync with the `thingId` of AWS IoT of this device.
+* `ownedBy`: the id of the user who owns the device. If nobody owns the device, this field is missing.
+* `locationDesc`: The location description that will enclosed to the image when the Camera uploads images. This field is optional.
+
+Now we can define the data schema for Device Management.
+
+```typescript
+interface Devices {
+  devices: { [id: string]: Device };
+  devicesByUser: {
+    [userId: string]: {
+      length: number;
+      [index: number]: Ref<Device>;
+    }
+  };
+  unsetOwnership: () => void;
+
+  setOwnership: () => void;
+  unsetOwnershipFromDevice: () => void;
+}
+```
+The get operation is supported to all the properties, but a user can only get the devices he/she owns. However only `devices[*].locationDesc` can be set, and only the device itself or the user owned the device are authorized to set the name of the device. Users' and Devices' identities will be stored in the HTTP header.
+
+* `devices`: devices indexed by id.
+* `devicesByUser`: devices array grouped by the id of users who own devices
+* `unsetOwnership`: unlink the ownership relation between a device and a user. Only the user who owns the device will call this function with success
+
+The following two functions can only be called by the device
+* `setOwnership`: to call this function, the caller should be authenticated as both an IoT and a Cognito user. This function will change the ownership of the device no matter who owns it.
+* `unsetOwnershipFromDevice`: call this function to remove any ownership relationship of this device 
+
+Instead of directly talking to this service, the Camera should talk to this service through the AWS IoT service. The detailed will be included in the Camera section.
+
+The underlying storage can be redis, dynamodb, or S3. However the attribute of the device should be stored in the attribute of the device in AWS IoT.
+
+## Application Server and Frontend
+
+The application server is a stateless server, and is the only server that frontends should talk to. It exposes all the functionality of the whole system to the external world, which currently includes: search an image on behalf of a user, list all the devices a user owns, remove the ownership of a device which is owned by a user, change the `locationDesc` of an owned device, get a specific image, get a specifc device.
+
+```typesciprt
+interface App {
+  user: {
+    [ email: string ]: {
+      imagesByObjects: {
+        [ object: string ]: {
+          length: number;
+          [ index: number ]: DetectionResult;
+        }
+      };
+      devices: {
+        length: number;
+        [ index : number ]: Ref<Device>;
+        remove: (id: string) => void;
+      }
+    };
+  };
+  devicesById: {
+    [ id: string ]: Device;
+  };
+  imagesById: {
+    [ id: string ]: Image;
+  };
+}
+```
+The previlege to get, set and remove to specific call is defined by the underlying system, the Application Server will not check.
+
+* `user`: where all user-image and user-device relation is stored indexed by users' emails.
+* `user[*].imageByObjects`: the interface where Image Search is exposed, detection results are grouped by the object in it. 
+* `user[*].imageByObjects[*].length`: the length of the results array
+* `user[*].imageByObjects[*][{integer}]`: one specific result
+* `user[*].devices`: the interface where Device Manage is exposed
+* `user[*].devices.length`: the length of the devices array
+* `user[*].devices.remove`: the function to unlink the ownership relationship of a specific device of the given user
+* `user[*].devices[{integer}]`: one specific device
+* `devicesById[*]`: a specific device 
+* `imagesById[*]`: a specific image
+
+As an edge service, this service is also responsible for authentication. To let users have access to the funtionality above, the frontend should only call the interface provided by the Application Service. To login and sign up, use the Cognito service. The design of the web app frontend should not be included in this document.
 
 ## Camera
 
-## Frontend
+### Talk to the Kenmyo system
+
+In order to communicate with different services. The Camera will directly talk to the AWS IoT service by using the Message Broke. The AWS IoT service will have Rules to call related lambda function on behalf of the Camera. The Camera can publish on following topics to implement different functionality:
+
+* `/camera/{clientId}/uploadImage`: this topic is for uploading the images
+* `/camera/{clientId}/setOwnership`: this topic is for changing the ownership of this device.
+* `/camera/{clientId}/unsetOwnership`: this topic is for unlink the ownership relationship of this device
+
+The schema of the payload of messages are:
+
+#### `/camera/{clientId}/uploadImage`
+
+```typescript
+interface UploadImageMsg {
+  image: string;
+}
+```
+
+* `image`: the image to upload. Should be in the png format encoded in base64
+
+#### `/camera/{clientId}/setOwnership`
+
+```typescript
+interface SetOwnershipMsg {
+  userIdToken: string;
+}
+```
+
+* `user`: the id token of the Cognito user
+
+#### `/camera/{clientId}/unsetOwnership`
+
+The payload of this message is empty.
+
+### Initialization
+
+During initialization, the AWS IoT should register the device, generate the cerficate, the related authorization rules. And the application runned on the Camera should download the certificate and related configuration files to its own storage to set up the running environment.
+
+### Camera App
+
+The app should host a local server.
+The user should visit this page to set or unlink the ownership.
+To set the ownership, the user should log in with his/her Cognito user.
+After logging, the Camera owns the users' token.
+The app should publish a message with the id token on the `/camera/{clientId}/setOwnership`.
+On this page, the user can also unlink the relationship by publising a message on the `/camera/{clientId}/unsetOwnership`.
+This page should also display the attribute of this camera elegantly.
+
+In order to upload images periodically, the app should publish on the `/camera/{clientId}/uploadImage`.
+
+### Attribute
+
+Except the `id` and the `name`, the Camera should also include `locationDesc` and `ownedBy`. The attribute should be kept synced with the cloud by using AWS Device Shadow Service. However, the attribute should only be used to display, not for authentication and authorization.
+
+## Authentication and Authorization
+
+Authentication only happens at the edge of the whole system: AWS IoT and the Application Server.
+The AWS IoT uses the X.509 to authenticate the incoming request from a device.
+The Application Server use the id token from the Cognito to authenticate a user.
+Once authentication completes, the internal system use `x-kenmyo-user-id` and `x-kenmyo-camera-id` to identify the user and the Camera respectively.
+
+When calls between different systems happens, `x-kenmyo-from-service` should be included in the header. The value can be:
+
+* `image-storage`
+* `image-search`
+* `object-detection`
+* `device-management`
+* `application-server`
+
+Authorization of the request from users and Cameras should happen in the microservice where the request is finnally handled.
+Authorization of the request from internal services should use AWS AMI to configure, the service can also authorize based on the `x-kenmyo-from-service`.
