@@ -328,13 +328,5 @@ The AWS IoT uses the X.509 to authenticate the incoming request from a device.
 The Application Server use the id token from the Cognito to authenticate a user.
 Once authentication completes, the internal system use `x-kenmyo-user-id` and `x-kenmyo-camera-id` to identify the user and the Camera respectively.
 
-When calls between different systems happens, `x-kenmyo-from-service` should be included in the header. The value can be:
-
-* `image-storage`
-* `image-search`
-* `object-detection`
-* `device-management`
-* `application-server`
-
 Authorization of the request from users and Cameras should happen in the microservice where the request is finnally handled.
-Authorization of the request from internal services should use AWS AMI to configure, the service can also authorize based on the `x-kenmyo-from-service`.
+Authorization of the request from internal services should use AWS AMI and AMI Policy to configure.
