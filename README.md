@@ -37,6 +37,8 @@ This is where images and related information stored. This service exposes follow
 * Add: allow Cameras to upload pictures
 * Get by id: allow App Server and Object Detection to retrieve image and related information
 
+### Data schema
+
 The endpoint of the Image Storage is `/images.json`. In order to define the data schema of Image Storage, we should first define `Image` interface.
 
 ```typescript
@@ -71,8 +73,8 @@ Now we can define the schema of the Image Storage.
 
 ```typescript
 interface Images {
-  [ id: number ]: Image;
-  add: (image: string) => void;
+  [ id: string ]: Image;
+  add: (image: string, coord?: [number, number]) => void;
 }
 ```
 Only get operation is supported, and only the user who owns the picture can get the given images, except for the Image Search system, which has the full access to get any of the images. All set operation will be denied. The users' identity will be stored in the HTTP header.
@@ -81,6 +83,80 @@ Only get operation is supported, and only the user who owns the picture can get 
 * `add` function will add an image to the Image Storage. This function can only be called by a Camera. The identity of the Camera will be stored in the HTTP header. It accepts a png image encoded by base64 string as the second parameter. The server will automatically calculate the rest properties of the `Image` interface. Once an image is added, the Image Storage will emit an event to notify the system that a new image is added. Only the Device Management can call this function. If the device that calls the function is not owned by any of the user, the call should be denied. How the camera should add an image will be included in the Camera section.
 
 S3, dynamodb and redis are all candidates for the permanent storage of Image Storage.
+
+### Implementation
+
+The whole system consists of a storage system including an S3 bucket and a dynamodb table to store the image itself and some meta data, a lambda to publish events on an AWS SNS topic when uploading to notify other services that an image has been uploaded, and a lambda served as the front router.
+
+#### Storage
+
+The storage includes a dynamodb table `image-storage.images` to store the meta data of images and an S3 bucket `image-storage.images` to store images themselves.
+
+The data schema of the dynamodb table is:
+
+```typescript
+{
+    id: string;
+    s3: string;
+    createdAt: number;
+    createdBy: string;
+    ownedBy: string;
+    location: {
+        desc: string;
+        geolocation?: [ number, number ];
+    }
+}
+```
+
+* `s3`: the s3 url where the image stores
+* `createdAt`: the unix timestamp when the image is uploaded
+
+The `id` field should be the only primary key.
+
+The meaning of other fields are the same as the `Image` schema. Only the Image Storage system components can visit these resources.
+
+The S3 will store images in png encoded by base64.
+
+#### Upload Event
+
+The event will be published to `/kenmyo/image-created` topic. The schema of the message body of the event is:
+```typescript
+{
+    id: string;
+}
+```
+The id indicates the id of the image uploaded.
+
+This event will be triggered by the dynamodb stream of `image-storage.images` table.
+
+#### Front router
+
+The front router resolves the incoming requests and manipulate the underlying system. According to the data schema, there are mainly three operations to implement:
+
+* get `[*].<property>` where the `<property>` can be `base64`, `createdAt`, `createdBy`, `ownedBy`
+* get `[*].location.<property>` where the `<property>` can be `desc` or `geolocation`
+* call `add`
+
+##### get `[*].<property>` and get `[*].location.<property>`
+
+`createdAt`, `createdBy`, `ownedBy`, `location.<property>` can be directly retrieved from the dynamodb table `image-storage.images`.
+
+For the `base64` field, the front router will first get the s3 url of the image by using the `s3` field from the table, and then retrieve the related image from S3, and fill the `base64` field by the returned value from S3 directly.
+
+The router will check the if the incoming IAM role is attached to the `ImageStorage.FullReadAccess` policy. If not, the router will deny the request when the `x-kenmyo-user-id` in the header isn't equal to the `ownedBy` field of the image requested. Otherwise, the image requested can always be retrieved.
+
+##### call `add`
+
+In order to insert an item into the `image-storage.images` table, all fields should be prepared. Here are how:
+
+* `id`: generate a uuid for the image 
+* `s3`: retrieve the base64 encoded image from the first paramter and then upload the content directly to the `image-storage.images` bucket and set this field by using the returned url.
+* `createdAt`: use `+ new Date()` to get the current time
+* `createdBy`: use the Camera id in the header `x-kenmyo-camera-id`
+* `ownedBy` and `location.desc`: retrieve the Camera id from header `x-kenmyo-camera-id`, and query the `Device Management` through the path `devices.<camera-id>.["ownedBy", "locationDesc"]` to find the user who currently owns the Camera and the location description respectively. If no one owns the camera, the add function will not take effect.
+* `location.geolocation`: if the second parameter `coord` is provided, use this as the value for the field
+
+The router will check if the incoming IAM role is attached to the `ImageStorage.CanAdd` policy. If not, the call to `add` function will be denied.
 
 ## Image Search
 
