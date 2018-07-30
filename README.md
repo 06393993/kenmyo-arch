@@ -23,7 +23,9 @@ Here are some basic principals when implementing all microservices.
 * Systems should communicate over HTTP, and should use Netflix Falcor technique (https://netflix.github.io/falcor/)
 * All API endpoint should use lambda to implement
 * Services may have their own permanent storage, but should not share between services
-* Authentication and authorization should only happen at the edge of the system
+* Authentication for edge users(users and devices) should only happen at the edge of the system
+* Authorization should only happen where the true access takes place
+* Use AWS IAM to manage the authentication of internal services as much as possible
 * Event driven
 
 The following sections will introduce the 7 components one by one. For the 5 services, the data schema in typescript’s type notation will be included.
@@ -82,8 +84,6 @@ Only get operation is supported, and only the user who owns the picture can get 
 * Images will be indexed by ids.
 * `add` function will add an image to the Image Storage. This function can only be called by a Camera. The identity of the Camera will be stored in the HTTP header. It accepts a png image encoded by base64 string as the second parameter. The server will automatically calculate the rest properties of the `Image` interface. Once an image is added, the Image Storage will emit an event to notify the system that a new image is added. Only the Device Management can call this function. If the device that calls the function is not owned by any of the user, the call should be denied. How the camera should add an image will be included in the Camera section.
 
-S3, dynamodb and redis are all candidates for the permanent storage of Image Storage.
-
 ### Implementation
 
 The whole system consists of a storage system including an S3 bucket and a dynamodb table to store the image itself and some meta data, a lambda to publish events on an AWS SNS topic when uploading to notify other services that an image has been uploaded, and a lambda served as the front router.
@@ -119,7 +119,7 @@ The S3 will store images in png encoded by base64.
 
 #### Upload Event
 
-The event will be published to `/kenmyo/image-created` topic. The schema of the message body of the event is:
+The event will be published to a topic identified by `ImageCreatedTopicArn`. The schema of the message body of the event is:
 ```typescript
 {
     id: string;
@@ -143,7 +143,7 @@ The front router resolves the incoming requests and manipulate the underlying sy
 
 For the `base64` field, the front router will first get the s3 url of the image by using the `s3` field from the table, and then retrieve the related image from S3, and fill the `base64` field by the returned value from S3 directly.
 
-The router will check the if the incoming IAM role is attached to the `ImageStorage.FullReadAccess` policy. If not, the router will deny the request when the `x-kenmyo-user-id` in the header isn't equal to the `ownedBy` field of the image requested. Otherwise, the image requested can always be retrieved.
+The router will check the if the incoming IAM role is attached to the `ImageStorageFullReadAccessPolicy` policy. If not, the router will deny the request when the `x-kenmyo-user-id` in the header isn't equal to the `ownedBy` field of the image requested. Otherwise, the image requested can always be retrieved.
 
 ##### call `add`
 
@@ -156,7 +156,26 @@ In order to insert an item into the `image-storage.images` table, all fields sho
 * `ownedBy` and `location.desc`: retrieve the Camera id from header `x-kenmyo-camera-id`, and query the `Device Management` through the path `devices.<camera-id>.["ownedBy", "locationDesc"]` to find the user who currently owns the Camera and the location description respectively. If no one owns the camera, the add function will not take effect.
 * `location.geolocation`: if the second parameter `coord` is provided, use this as the value for the field
 
-The router will check if the incoming IAM role is attached to the `ImageStorage.CanAdd` policy. If not, the call to `add` function will be denied.
+The router will check if the incoming IAM role is attached to the `ImageStorageCanAddPolicy` policy. If not, the call to `add` function will be denied.
+This policy should only be attached to the Device Management service. Since the Image Storage will trust the Camera id provided in the request, so it's dangerous to assign other roles with this policy.
+
+#### Parameters and Outputs
+
+The whole system will be deployed as a CloudFormation stack, the parameters and outputs will be included.
+
+##### Parameters
+
+* `StackName`: the name of the stack to deploy to
+* `ImageCreatedTopicArn`: the arn of the topic where the event to publish when an image is added to the dynamodb
+* `ImagesS3Bucket`: the name of the S3 bucket where the images store, the stack will create the bucket
+* `ImagesMetaTable`: the name of the dynamodb table where the metadata of images store, the stack will create the table
+* `DeviceManagementAPIEndpoint`: the api endpoint of the Device Management service
+
+##### Outputs
+
+* `ImageStorageFullReadAccessPolicy`: the policy that allows a role to bypass the `x-kenmyo-user-id` authorization when request for images
+* `ImageStorageCanAddPolicy`: the policy that allows a role to call `add` function
+* `ImageStorageAPIEndpoint`: the url where the Image Storage service is hosted
 
 ## Image Search
 
